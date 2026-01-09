@@ -5,10 +5,11 @@ import {
   AlertCircle, ChevronDown, Hash, Layers, Box, Component, Cpu, 
   X, ArrowRight, Save, Trash2, FileText, Activity, ChevronUp,
   BarChart3, Edit, Share2, Truck, ClipboardCheck, TrendingUp,
-  Package, Ruler, DollarSign, Factory
+  Package, Ruler, DollarSign, Factory, ClipboardList, Filter,
+  RefreshCw, MapPin, Check, ArrowLeft, RotateCcw, Loader2
 } from 'lucide-react';
 
-// --- 模拟数据生成器 ---
+// --- 模拟数据生成器 (项目管理) ---
 const generateHierarchyData = (projectId) => {
   return Array.from({ length: 4 }, (_, mIdx) => ({
     id: `m-${projectId}-${mIdx}`,
@@ -53,12 +54,330 @@ const INITIAL_PROJECTS = [
   { id: 5, title: "春季营销活动 H5 矩阵", client: "市场部", status: "风险", progress: 30, startDate: "2024-02-01", description: "包含3个互动小游戏和抽奖系统的开发。", teamMembers: 6 }
 ];
 
+// --- 订单追踪模拟 API ---
+const MockAPI = {
+  getYears: async () => new Promise(r => setTimeout(() => r(['2023', '2024']), 300)),
+  getSuppliers: async (year) => new Promise(r => setTimeout(() => r(
+    year === '2023' ? ['博世自动化', '西门子工业', '施耐德电气'] : ['博世自动化', '华为技术', 'ABB']
+  ), 300)),
+  getOrders: async (supplier) => new Promise(r => setTimeout(() => {
+    const map = {
+      '博世自动化': ['PO-2023-001', 'PO-2023-089'],
+      '西门子工业': ['PO-SIEM-992'],
+      '施耐德电气': ['PO-SCH-221'],
+      '华为技术': ['PO-HW-888', 'PO-HW-999'],
+      'ABB': ['PO-ABB-123']
+    };
+    r(map[supplier] || []);
+  }, 300)),
+  getBatches: async (order) => new Promise(r => setTimeout(() => r([`Batch-${order}-A`, `Batch-${order}-B`]), 300)),
+  getMachines: async (batch) => new Promise(r => setTimeout(() => r([`Machine-X1 (${batch})`, `Machine-Z9 (${batch})`]), 300)),
+  getProducts: async (machine) => new Promise(r => setTimeout(() => r([
+    { id: 101, name: '高精度伺服电机', sku: 'MTR-2000X', quantity: 50, unit: '台', status: '已入库', deliveryDate: '2024-03-15' },
+    { id: 102, name: '工业控制芯片组', sku: 'IC-9900-PRO', quantity: 2000, unit: '片', status: '运输中', deliveryDate: '2024-03-20' },
+    { id: 103, name: '液压泵密封圈', sku: 'SEAL-RUB-55', quantity: 500, unit: '包', status: '质检中', deliveryDate: '2024-03-18' },
+  ]), 500)),
+};
+
+// --- Order Tracking 组件 (异步树形版) ---
+const OrderTrackingView = () => {
+  // 树节点结构: { id, label, type, children: [], isLoading: bool, isExpanded: bool, parentId }
+  const [treeNodes, setTreeNodes] = useState([]);
+  const [selectedNodeId, setSelectedNodeId] = useState(null);
+  const [resultData, setResultData] = useState(null);
+  const [resultLoading, setResultLoading] = useState(false);
+
+  // 初始化加载年份
+  useEffect(() => {
+    const loadYears = async () => {
+      const years = await MockAPI.getYears();
+      const nodes = years.map(y => ({
+        id: `year-${y}`,
+        label: y,
+        type: 'year',
+        children: [],
+        isLoading: false,
+        isExpanded: false,
+        data: y // 原始数据
+      }));
+      setTreeNodes(nodes);
+    };
+    loadYears();
+  }, []);
+
+  // 核心：处理节点点击/展开
+  const handleToggleNode = async (nodeId) => {
+    // 递归查找并更新节点的辅助函数
+    const updateNodeInTree = (nodes, targetId, updater) => {
+      return nodes.map(node => {
+        if (node.id === targetId) return updater(node);
+        if (node.children && node.children.length > 0) {
+          return { ...node, children: updateNodeInTree(node.children, targetId, updater) };
+        }
+        return node;
+      });
+    };
+
+    // 查找当前节点
+    const findNode = (nodes, targetId) => {
+      for (const node of nodes) {
+        if (node.id === targetId) return node;
+        if (node.children) {
+          const found = findNode(node.children, targetId);
+          if (found) return found;
+        }
+      }
+      return null;
+    };
+
+    const node = findNode(treeNodes, nodeId);
+    if (!node) return;
+
+    // 如果是叶子节点 (Machine)，直接选中并加载数据
+    if (node.type === 'machine') {
+      setSelectedNodeId(nodeId);
+      setResultLoading(true);
+      const products = await MockAPI.getProducts(node.data);
+      setResultData({
+        machine: node.label,
+        products
+      });
+      setResultLoading(false);
+      return;
+    }
+
+    // 如果已经展开，则折叠
+    if (node.isExpanded) {
+      setTreeNodes(prev => updateNodeInTree(prev, nodeId, n => ({ ...n, isExpanded: false })));
+      return;
+    }
+
+    // 如果未展开且已有子节点，直接展开
+    if (node.children && node.children.length > 0) {
+      setTreeNodes(prev => updateNodeInTree(prev, nodeId, n => ({ ...n, isExpanded: true })));
+      return;
+    }
+
+    // 如果未展开且无子节点，需要加载数据
+    setTreeNodes(prev => updateNodeInTree(prev, nodeId, n => ({ ...n, isLoading: true })));
+
+    let childrenData = [];
+    let childType = '';
+    
+    try {
+      if (node.type === 'year') {
+        childrenData = await MockAPI.getSuppliers(node.data);
+        childType = 'supplier';
+      } else if (node.type === 'supplier') {
+        childrenData = await MockAPI.getOrders(node.data);
+        childType = 'order';
+      } else if (node.type === 'order') {
+        childrenData = await MockAPI.getBatches(node.data);
+        childType = 'batch';
+      } else if (node.type === 'batch') {
+        childrenData = await MockAPI.getMachines(node.data);
+        childType = 'machine';
+      }
+
+      const newChildren = childrenData.map((d, idx) => ({
+        id: `${childType}-${d}-${idx}`, // 简单生成唯一ID
+        label: d,
+        type: childType,
+        children: [],
+        isLoading: false,
+        isExpanded: false,
+        data: d
+      }));
+
+      setTreeNodes(prev => updateNodeInTree(prev, nodeId, n => ({ 
+        ...n, 
+        isLoading: false, 
+        isExpanded: true, 
+        children: newChildren 
+      })));
+
+    } catch (e) {
+      console.error(e);
+      setTreeNodes(prev => updateNodeInTree(prev, nodeId, n => ({ ...n, isLoading: false })));
+    }
+  };
+
+  // 递归渲染树节点
+  const renderTree = (nodes) => {
+    return nodes.map(node => (
+      <div key={node.id} className="pl-4 relative">
+        {/* 连接线 */}
+        <div className="absolute left-0 top-0 bottom-0 w-px bg-slate-200" />
+        
+        <div 
+          onClick={(e) => { e.stopPropagation(); handleToggleNode(node.id); }}
+          className={`relative flex items-center gap-2 py-2 px-2 pr-4 rounded-lg cursor-pointer transition-all border border-transparent
+            ${selectedNodeId === node.id ? 'bg-indigo-50 border-indigo-200 text-indigo-700 font-medium' : 'hover:bg-slate-50 text-slate-600'}
+          `}
+        > 
+           {/* 连接横线 */}
+           <div className="absolute -left-4 top-1/2 w-4 h-px bg-slate-200" />
+
+           {/* 展开图标 / 加载中 */}
+           <div className="flex-shrink-0 w-4 h-4 flex items-center justify-center">
+             {node.isLoading ? (
+               <Loader2 size={14} className="animate-spin text-indigo-500" />
+             ) : node.type === 'machine' ? (
+               <div className="w-1.5 h-1.5 rounded-full bg-slate-300"></div> // 叶子节点无图标
+             ) : (
+               node.isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />
+             )}
+           </div>
+
+           {/* 类型图标 */}
+           <div className={`p-1 rounded ${selectedNodeId === node.id ? 'bg-indigo-100' : 'bg-slate-100 text-slate-500'}`}>
+              {node.type === 'year' && <Calendar size={14}/>}
+              {node.type === 'supplier' && <Factory size={14}/>}
+              {node.type === 'order' && <FileText size={14}/>}
+              {node.type === 'batch' && <Layers size={14}/>}
+              {node.type === 'machine' && <Cpu size={14}/>}
+           </div>
+
+           <span className="truncate text-sm">{node.label}</span>
+        </div>
+
+        {/* 子节点渲染 */}
+        {node.isExpanded && node.children && (
+          <div className="animate-fade-in-down origin-top">
+            {renderTree(node.children)}
+          </div>
+        )}
+      </div>
+    ));
+  };
+
+  return (
+    <div className="flex h-full bg-white animate-fade-in overflow-hidden">
+      
+      {/* 左侧：异步数据树 */}
+      <div className="w-80 border-r border-slate-200 flex flex-col bg-slate-50/30">
+        <div className="p-4 border-b border-slate-100 bg-white">
+          <h2 className="font-bold text-slate-800 flex items-center gap-2">
+            <Filter size={18} className="text-indigo-600"/> 数据导航
+          </h2>
+          <p className="text-xs text-slate-500 mt-1">点击展开各层级以查找订单</p>
+        </div>
+        <div className="flex-1 overflow-y-auto p-2">
+           {/* 根节点不需要左侧padding和连线，特殊处理 */}
+           <div className="-ml-4">
+             {renderTree(treeNodes)}
+           </div>
+           
+           {treeNodes.length === 0 && (
+             <div className="flex justify-center p-4">
+               <Loader2 className="animate-spin text-slate-400"/>
+             </div>
+           )}
+        </div>
+      </div>
+
+      {/* 右侧：结果展示区 */}
+      <div className="flex-1 flex flex-col bg-white">
+        {selectedNodeId ? (
+          <>
+            <div className="px-8 py-6 border-b border-slate-200 flex justify-between items-start bg-slate-50/50">
+               <div>
+                 <div className="flex items-center gap-2 mb-1">
+                   <div className="bg-green-100 text-green-700 p-1.5 rounded-lg">
+                     <ClipboardList size={20} />
+                   </div>
+                   <h2 className="text-xl font-bold text-slate-800">订单商品明细</h2>
+                 </div>
+                 <div className="flex items-center gap-2 text-sm text-slate-500 mt-1">
+                    <span className="bg-slate-100 px-2 py-0.5 rounded text-xs font-mono">
+                      {resultData?.machine || 'Loading...'}
+                    </span>
+                 </div>
+               </div>
+               <div className="flex gap-2">
+                 <button className="flex items-center gap-2 px-3 py-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 rounded-lg shadow-sm text-sm font-medium transition-colors">
+                   <RefreshCw size={16}/> 刷新
+                 </button>
+                 <button className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg shadow-sm text-sm font-medium transition-colors">
+                   <Share2 size={16}/> 导出
+                 </button>
+               </div>
+            </div>
+
+            <div className="flex-1 p-8 overflow-hidden bg-slate-50">
+              {resultLoading ? (
+                 <div className="h-full flex flex-col items-center justify-center text-slate-400">
+                    <Loader2 size={48} className="animate-spin mb-4 text-indigo-300"/>
+                    <p>正在加载商品数据...</p>
+                 </div>
+              ) : (
+                <div className="bg-white rounded-xl border border-slate-200 shadow-sm flex flex-col h-full overflow-hidden animate-scale-in">
+                  <div className="overflow-y-auto flex-1">
+                    <table className="w-full text-left text-sm">
+                      <thead className="bg-white sticky top-0 z-10 border-b border-slate-200 text-slate-500">
+                        <tr>
+                          <th className="px-6 py-4 font-medium">SKU 编号</th>
+                          <th className="px-6 py-4 font-medium">商品名称</th>
+                          <th className="px-6 py-4 font-medium">订单数量</th>
+                          <th className="px-6 py-4 font-medium">状态</th>
+                          <th className="px-6 py-4 font-medium">预计交付</th>
+                          <th className="px-6 py-4 font-medium text-right">操作</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {resultData?.products.map(item => (
+                          <tr key={item.id} className="hover:bg-slate-50 transition-colors">
+                            <td className="px-6 py-4 font-mono text-slate-600">{item.sku}</td>
+                            <td className="px-6 py-4 font-medium text-slate-800">{item.name}</td>
+                            <td className="px-6 py-4 text-slate-600">{item.quantity} {item.unit}</td>
+                            <td className="px-6 py-4">
+                              <span className={`px-2.5 py-1 rounded-full text-xs font-medium border
+                                ${item.status === '已入库' ? 'bg-green-50 text-green-700 border-green-200' : 
+                                  item.status === '运输中' ? 'bg-blue-50 text-blue-700 border-blue-200' : 
+                                  'bg-yellow-50 text-yellow-700 border-yellow-200'}`}>
+                                {item.status}
+                              </span>
+                            </td>
+                            <td className="px-6 py-4 text-slate-600">{item.deliveryDate}</td>
+                            <td className="px-6 py-4 text-right">
+                              <button className="text-indigo-600 hover:text-indigo-800 font-medium text-xs hover:underline">查看物流</button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="p-3 border-t border-slate-200 bg-slate-50 text-right text-xs text-slate-400">
+                     共检索到 {resultData?.products.length} 条记录
+                  </div>
+                </div>
+              )}
+            </div>
+          </>
+        ) : (
+          <div className="flex-1 flex flex-col items-center justify-center text-slate-300">
+            <div className="w-24 h-24 bg-slate-100 rounded-full flex items-center justify-center mb-6">
+              <Search size={48} className="opacity-20 text-slate-500"/>
+            </div>
+            <h3 className="text-lg font-medium text-slate-600">准备就绪</h3>
+            <p className="max-w-xs text-center mt-2 text-slate-400">请在左侧导航栏展开层级，并选择一个最终的 <span className="font-mono bg-slate-100 px-1 rounded text-slate-500">设备 (Machine)</span> 节点以查看报表。</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
 // --- 辅助组件定义 ---
 
-const NavItem = ({ icon, label, active }) => (
-  <button className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${active ? 'bg-indigo-50 text-indigo-700' : 'text-slate-600 hover:bg-slate-50'}`}>
+const NavItem = ({ icon, label, active, onClick }) => (
+  <button 
+    onClick={onClick}
+    className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-colors ${active ? 'bg-indigo-50 text-indigo-700' : 'text-slate-600 hover:bg-slate-50'}`}
+  >
     {icon}
     <span className="text-sm font-medium">{label}</span>
+    {active && <div className="ml-auto w-1.5 h-1.5 rounded-full bg-indigo-600"></div>}
   </button>
 );
 
@@ -93,7 +412,7 @@ const EmptyState = () => (
   </div>
 );
 
-// --- 树形导航节点组件 ---
+// --- 树形导航节点组件 (Tree Browser) ---
 const TreeNode = ({ item, level = 0, selectedId, onSelect, expandedIds, toggleExpand }) => {
   const hasChildren = (item.assemblies && item.assemblies.length > 0) || (item.parts && item.parts.length > 0);
   const isExpanded = expandedIds.includes(item.id);
@@ -173,8 +492,6 @@ const Workspace = ({ selectedItem, projectTitle, breadcrumbs, onUpdate, onNaviga
   );
 
   // --- 面板渲染逻辑 ---
-
-  // 1. Machine 面板: 运行监控
   const renderMachinePanel = () => (
     <section className="grid grid-cols-1 md:grid-cols-2 gap-6 animate-fade-in-up delay-100">
       <div className="bg-white border border-slate-200 rounded-xl p-6 shadow-sm">
@@ -204,7 +521,6 @@ const Workspace = ({ selectedItem, projectTitle, breadcrumbs, onUpdate, onNaviga
     </section>
   );
 
-  // 2. Assembly 面板: 供应链与质检
   const renderAssemblyPanel = () => (
     <section className="grid grid-cols-1 md:grid-cols-2 gap-6 animate-fade-in-up delay-100">
       <div className="bg-white border border-slate-200 rounded-xl p-6 shadow-sm relative overflow-hidden group">
@@ -244,7 +560,6 @@ const Workspace = ({ selectedItem, projectTitle, breadcrumbs, onUpdate, onNaviga
     </section>
   );
 
-  // 3. Part 面板: 库存与成本 (因为没有子级列表，这里可以占据更多空间)
   const renderPartPanel = () => (
     <div className="space-y-6 animate-fade-in-up delay-100">
       {/* 物理规格 */}
@@ -596,6 +911,7 @@ const TreeBrowserModal = ({ project, onClose }) => {
 
 // --- ERP 主入口组件 ---
 export default function ProjectManagementERP() {
+  const [activeTab, setActiveTab] = useState('projects'); // 新增状态：控制当前视图 ('projects' | 'tracking')
   const [projects, setProjects] = useState(INITIAL_PROJECTS);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
@@ -603,6 +919,7 @@ export default function ProjectManagementERP() {
   const [collapsedGroups, setCollapsedGroups] = useState({});
   const groupRefs = useRef({});
 
+  // --- Project List View 逻辑 ---
   const groupedData = useMemo(() => {
     const filtered = projects.filter(p => p.title.toLowerCase().includes(searchTerm.toLowerCase()) || p.client.toLowerCase().includes(searchTerm.toLowerCase()));
     const sorted = filtered.sort((a, b) => new Date(b.startDate) - new Date(a.startDate));
@@ -623,6 +940,56 @@ export default function ProjectManagementERP() {
   const toggleGroup = (key) => setCollapsedGroups(prev => ({ ...prev, [key]: !prev[key] }));
   const scrollToGroup = (key) => groupRefs.current[key]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
+  // --- 项目列表视图组件 (抽离以保持主结构清晰) ---
+  const ProjectListView = () => (
+    <>
+      <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-8 flex-shrink-0 z-10 animate-fade-in">
+        <div className="flex items-center gap-4 w-1/3">
+            <div className="relative w-full max-w-md">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+              <input type="text" placeholder="搜索项目..." className="w-full pl-10 pr-4 py-2 bg-slate-100 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm outline-none" value={searchTerm} onChange={e => setSearchTerm(e.target.value)} />
+            </div>
+        </div>
+        <div className="flex gap-4">
+            <button className="p-2 text-slate-500 hover:bg-slate-100 rounded-full"><Bell size={20}/></button>
+            <button onClick={() => setIsModalOpen(true)} className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg font-medium shadow-sm"><Plus size={18}/><span>新建项目</span></button>
+        </div>
+      </header>
+
+      <div className="flex flex-1 overflow-hidden relative animate-fade-in">
+        <div className="flex-1 overflow-y-auto p-8 scroll-smooth">
+            <h1 className="text-2xl font-bold text-slate-800 mb-8">项目列表</h1>
+            <div className="space-y-8 pb-20">
+              {Object.entries(groupedData.groups).map(([dateKey, groupData]) => (
+                <div key={dateKey} ref={el => groupRefs.current[dateKey] = el}>
+                  <div className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur-sm py-3 mb-4 flex items-center gap-3 cursor-pointer select-none" onClick={() => toggleGroup(dateKey)}>
+                      <div className="p-1.5 bg-white border border-slate-200 rounded-md text-indigo-600 shadow-sm">{collapsedGroups[dateKey] ? <ChevronRight size={18}/> : <ChevronDown size={18}/>}</div>
+                      <h2 className="text-lg font-bold text-slate-700">{groupData.year}年 <span className="text-slate-900">{groupData.month}月</span></h2>
+                      <div className="h-px bg-slate-200 flex-1"></div>
+                  </div>
+                  {!collapsedGroups[dateKey] && (
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                      {groupData.projects.map(project => (
+                        <ProjectCard key={project.id} project={project} onOpenHierarchy={() => setViewingProject(project)} />
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+        </div>
+        <div className="hidden lg:flex w-48 bg-white border-l border-slate-200 flex-col overflow-y-auto">
+            <div className="p-4 border-b border-slate-100 sticky top-0 bg-white font-semibold text-sm text-slate-500">快速导航</div>
+            <div className="p-3 space-y-2">
+              {Object.keys(groupedData.groups).map(key => (
+                <button key={key} onClick={() => scrollToGroup(key)} className="w-full text-left px-3 py-2 text-sm text-slate-600 hover:bg-indigo-50 rounded-md transition-colors">{key}</button>
+              ))}
+            </div>
+        </div>
+      </div>
+    </>
+  );
+
   return (
     <div className="flex h-screen bg-slate-50 font-sans text-slate-900">
       <aside className="w-64 bg-white border-r border-slate-200 flex-shrink-0 flex flex-col hidden md:flex">
@@ -631,59 +998,29 @@ export default function ProjectManagementERP() {
           <span className="text-xl font-bold text-slate-800">Nexus ERP</span>
         </div>
         <nav className="p-4 space-y-1 flex-1">
-          <NavItem icon={<Layout size={20} />} label="工作台" />
-          <NavItem icon={<Folder size={20} />} label="项目管理" active />
+          <NavItem 
+            icon={<Folder size={20} />} 
+            label="项目管理" 
+            active={activeTab === 'projects'} 
+            onClick={() => setActiveTab('projects')}
+          />
+          <NavItem 
+            icon={<ClipboardList size={20} />} 
+            label="订单追踪" 
+            active={activeTab === 'tracking'} 
+            onClick={() => setActiveTab('tracking')}
+          />
           <NavItem icon={<Users size={20} />} label="团队资源" />
+          <NavItem icon={<Layout size={20} />} label="系统报表" />
         </nav>
       </aside>
 
-      <main className="flex-1 flex flex-col overflow-hidden">
-        <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-8 flex-shrink-0 z-10">
-          <div className="flex items-center gap-4 w-1/3">
-             <div className="relative w-full max-w-md">
-               <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
-               <input type="text" placeholder="搜索项目..." className="w-full pl-10 pr-4 py-2 bg-slate-100 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm outline-none" value={searchTerm} onChange={e => setSearchTerm(e.target.value)} />
-             </div>
-          </div>
-          <div className="flex gap-4">
-             <button className="p-2 text-slate-500 hover:bg-slate-100 rounded-full"><Bell size={20}/></button>
-             <button onClick={() => setIsModalOpen(true)} className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg font-medium shadow-sm"><Plus size={18}/><span>新建项目</span></button>
-          </div>
-        </header>
-
-        <div className="flex flex-1 overflow-hidden relative">
-          <div className="flex-1 overflow-y-auto p-8 scroll-smooth">
-             <h1 className="text-2xl font-bold text-slate-800 mb-8">项目列表</h1>
-             <div className="space-y-8 pb-20">
-               {Object.entries(groupedData.groups).map(([dateKey, groupData]) => (
-                 <div key={dateKey} ref={el => groupRefs.current[dateKey] = el}>
-                    <div className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur-sm py-3 mb-4 flex items-center gap-3 cursor-pointer select-none" onClick={() => toggleGroup(dateKey)}>
-                       <div className="p-1.5 bg-white border border-slate-200 rounded-md text-indigo-600 shadow-sm">{collapsedGroups[dateKey] ? <ChevronRight size={18}/> : <ChevronDown size={18}/>}</div>
-                       <h2 className="text-lg font-bold text-slate-700">{groupData.year}年 <span className="text-slate-900">{groupData.month}月</span></h2>
-                       <div className="h-px bg-slate-200 flex-1"></div>
-                    </div>
-                    {!collapsedGroups[dateKey] && (
-                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                        {groupData.projects.map(project => (
-                          <ProjectCard key={project.id} project={project} onOpenHierarchy={() => setViewingProject(project)} />
-                        ))}
-                      </div>
-                    )}
-                 </div>
-               ))}
-             </div>
-          </div>
-          <div className="hidden lg:flex w-48 bg-white border-l border-slate-200 flex-col overflow-y-auto">
-             <div className="p-4 border-b border-slate-100 sticky top-0 bg-white font-semibold text-sm text-slate-500">快速导航</div>
-             <div className="p-3 space-y-2">
-                {Object.keys(groupedData.groups).map(key => (
-                  <button key={key} onClick={() => scrollToGroup(key)} className="w-full text-left px-3 py-2 text-sm text-slate-600 hover:bg-indigo-50 rounded-md transition-colors">{key}</button>
-                ))}
-             </div>
-          </div>
-        </div>
+      <main className="flex-1 flex flex-col overflow-hidden bg-slate-50">
+        {/* 根据 activeTab 渲染不同视图 */}
+        {activeTab === 'projects' ? <ProjectListView /> : <OrderTrackingView />}
       </main>
 
+      {/* 弹窗组件 */}
       {viewingProject && <TreeBrowserModal project={viewingProject} onClose={() => setViewingProject(null)} />}
     </div>
   );
